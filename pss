@@ -269,11 +269,15 @@ def parsed_opts():
     opt.add_option("-c", "--count", default=10, type='int', help="count to sampling [default: %default]" )
     opt.add_option("-i", "--interval", default=10, type='int', help="interval to sampling [default: %default]" )
     opt.add_option("-d", "--delta", default=False, action="store_true", help="show changed procs only [default: %default]" )
+    opt.add_option("-p", "--prof", default=False, action="store_true", help="profiling [default: %default]" )
     (opts, args)= opt.parse_args()
     return dict(opts.__dict__.items() + [('filters', args)])
 
 
 if "__main__" == __name__:
-    #import cProfile
-    #cProfile.run('main(parsed_opts())')
+    opts = parsed_opts()
+    if opts['prof']:
+      import cProfile
+      cProfile.run('main(parsed_opts())')
+      sys.exit(0)
     main(parsed_opts())
