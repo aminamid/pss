@@ -1,0 +1,279 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import glob
+import pwd
+import grp
+import time
+import datetime
+import sched
+import re
+from itertools import takewhile
+from logging import getLogger, basicConfig
+
+logger=getLogger(__name__)
+basicConfig(level=15,stream=sys.stdout,format="%(message)s")
+
+hz = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+
+colStat=['pid', 'comm', 'state', 'ppid', 'pgrp', 'session', 'tty_nr', 'tpgid', 'flags', 'minflt', 'cminflt', 'majflt', 'cmajflt', 'utime', 'stime', 'cutime', 'cstime', 'priority', 'nice', 'num_threads', 'itrealvalue', 'starttime', 'vsize', 'rss', 'rsslim']
+
+colStat.append('delta')
+colStat.append('cmdline')
+
+colToKeepStat=['pid','utime', 'stime', 'cutime', 'cstime', 'starttime', 'delta', 'num_threads', 'cmdline', 'comm']
+#colToKeepStatus=['Uid', 'Gid', 'VmSize', 'VmRSS', 'VmPeak', 'VmHWM', 'VmStk', 'VmData','VmExe','VmSwap', 'voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches']
+colToKeepStatus=['Uid', 'VmSize', 'VmRSS', 'VmPeak', 'VmHWM', 'VmStk', 'VmData','VmExe','VmSwap', 'voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches']
+
+def read_one_line(file):
+    try:
+      return open(file).readline().strip()
+    except IOError as e:
+      return []
+    return []
+
+def read_all_lines(file):
+    try:
+      return [ l.strip() for l in open(file) ]
+    except IOError as e:
+      return []
+    return []
+
+
+def read_lines_to_dict(filename,key_value_regx= re.compile( r"^([^:]+)\s*:\s*(.*)$" ) ):
+    return dict([ ( regx_rslt.group(1), regx_rslt.group(2) ) for regx_rslt in [  key_value_regx.search(line) for line in read_all_lines(filename) ] if regx_rslt ] )
+
+
+def ints_strs(digit_str_list):
+    return ( [ int(x) for x in digit_str_list if x.isdigit() ], [ x for x in digit_str_list if not x.isdigit() ] )
+
+
+def pids():
+    return [ int(p) for p in [ x.split('/')[2] for x in glob.glob('/proc/*')] if p.isdigit()]
+
+def get_pid_data():
+    pid_data_now = {}
+
+    for pid in pids():
+        rawCpustat = read_one_line('/proc/stat')
+        rawStat = read_one_line('/proc/{0}/stat'.format(pid))
+        rawCmdline = read_one_line('/proc/{0}/cmdline'.format(pid))
+        dictStatus = read_lines_to_dict('/proc/{0}/status'.format(pid))
+        if [x for x in [rawCpustat, rawStat, rawCmdline, dictStatus ] if not x]: continue
+        listStat=rawStat.split()[0:len(colStat)-2] # 2 shows delta and cmdline
+        if len(rawCmdline) <1:
+            rawCmdline = listStat[1]
+        list_tmp_cpustat=[int(s) for s in rawCpustat.split()[1:]]
+        listStat.append(sum(list_tmp_cpustat))
+        listStat.append(rawCmdline.replace('\0',' '))
+        
+        pid_data_now[pid]={}
+        for item in colToKeepStat:
+            pid_data_now[pid][item]=listStat[colStat.index(item)]
+        for item in colToKeepStatus:
+            try:
+                pid_data_now[pid][item]=dictStatus[item]
+            except KeyError:
+                pid_data_now[pid][item]="null"
+            except Exception, e:
+                sys.exit(1)
+    return pid_data_now
+
+def getCpuUsage(dictOld,dictNow):
+    olduRaw=int(dictOld['utime'])+int(dictOld['cutime'])
+    nowuRaw=int(dictNow['utime'])+int(dictNow['cutime'])
+    oldsRaw=int(dictOld['stime'])+int(dictOld['cstime'])
+    nowsRaw=int(dictNow['stime'])+int(dictNow['cstime'])
+    uRaw=float(nowuRaw-olduRaw)
+    sRaw=float(nowsRaw-oldsRaw)
+    totalRaw=float(uRaw+sRaw)
+    denomi = float(dictNow['delta'])-float(dictOld['delta'])
+    return (100*totalRaw/denomi,100*uRaw/denomi,100*sRaw/denomi)
+    
+
+def getCpuUsageFirst(dictNow):
+    nowuRaw=int(dictNow['utime'])+int(dictNow['cutime'])
+    nowsRaw=int(dictNow['stime'])+int(dictNow['cstime'])
+    uRaw=float(nowuRaw)
+    sRaw=float(nowsRaw)
+    totalRaw=float(uRaw+sRaw)
+    denomi = float(dictNow['delta'])-float(dictNow['starttime'])
+    return (100*totalRaw/denomi,100*uRaw/denomi,100*sRaw/denomi)
+
+
+def procInfoCreated(orig_dict):
+    to_report_dict = {}
+    to_report_dict['pid'] = int(orig_dict['pid'])
+    to_report_dict['num_threads'] = int(orig_dict['num_threads'])
+    if orig_dict.has_key('vountary_ctxt_switches') and orig_dict.has_key('nonvountary_ctxt_switches') :
+        to_report_dict['v_cs'] = int(orig_dict['voluntary_ctxt_switches'])
+        to_report_dict['nv_cs'] = int(orig_dict['nonvoluntary_ctxt_switches'])
+    else:
+        to_report_dict['v_cs'] = 0
+        to_report_dict['nv_cs'] = 0
+    to_report_dict['cmdline'] = orig_dict['cmdline']
+
+    (to_report_dict['%CPU'],to_report_dict['%usr'],to_report_dict['%sys'])=getCpuUsageFirst(orig_dict)
+
+    regx=re.compile(r"(\d+)\skB")
+    for key in ['VmSize', 'VmRSS', 'VmPeak', 'VmHWM', 'VmStk', 'VmData','VmExe','VmSwap' ]:
+        result_regx = regx.search(orig_dict[key])
+        if result_regx != None:
+            to_report_dict[key] = int(result_regx.group(1))
+        else:
+            to_report_dict[key] = 0
+
+    to_report_dict['Uid'] = pwd.getpwuid(int(orig_dict['Uid'].split()[0])).pw_name
+    #to_report_dict['Gid'] = grp.getgrgid(int(orig_dict['Gid'].split()[0])).gr_name
+
+
+    return to_report_dict
+
+def procInfoContinue(orig_dict_old,orig_dict_now):
+    to_report_dict = {}
+
+    to_report_dict['pid'] = int(orig_dict_now['pid'])
+    to_report_dict['num_threads'] = int(orig_dict_now['num_threads'])
+    to_report_dict['cmdline'] = orig_dict_now['cmdline']
+    if orig_dict_now.has_key('vountary_ctxt_switches') and orig_dict_now.has_key('nonvountary_ctxt_switches') :
+        to_report_dict['v_cs'] = int(orig_dict_now['voluntary_ctxt_switches'])
+        to_report_dict['nv_cs'] = int(orig_dict_now['nonvoluntary_ctxt_switches'])
+    else:
+        to_report_dict['v_cs'] = 0
+        to_report_dict['nv_cs'] = 0
+
+    (to_report_dict['%CPU'],to_report_dict['%usr'],to_report_dict['%sys'])=getCpuUsage(orig_dict_old,orig_dict_now)
+
+    regx=re.compile(r"(\d+)\skB")
+    for key in ['VmSize', 'VmRSS', 'VmPeak', 'VmHWM', 'VmStk', 'VmData','VmExe','VmSwap' ]:
+        result_regx = regx.search(orig_dict_now[key])
+        if result_regx != None:
+            to_report_dict[key] = int(result_regx.group(1))
+        else:
+            to_report_dict[key] = 0
+    to_report_dict['Uid'] = pwd.getpwuid(int(orig_dict_now['Uid'].split()[0])).pw_name
+    #to_report_dict['Gid'] = grp.getgrgid(int(orig_dict_now['Gid'].split()[0])).gr_name
+
+    return to_report_dict
+
+
+def procInfoDeleted(orig_dict):
+    to_report_dict = {}
+    to_report_dict['pid'] = int(orig_dict['pid'])
+    to_report_dict['num_threads'] = 0
+    to_report_dict['v_cs'] = 0
+    to_report_dict['nv_cs'] = 0
+    to_report_dict['cmdline'] = orig_dict['cmdline']
+    (to_report_dict['%CPU'],to_report_dict['%usr'],to_report_dict['%sys'])=(0.0,0.0,0.0) 
+
+    regx=re.compile(r"(\d+)\skB")
+    for key in ['VmSize', 'VmRSS', 'VmPeak', 'VmHWM', 'VmStk', 'VmData','VmExe','VmSwap' ]:
+        to_report_dict[key] = 0
+
+    to_report_dict['Uid'] = pwd.getpwuid(int(orig_dict['Uid'].split()[0])).pw_name
+    #to_report_dict['Gid'] = grp.getgrgid(int(orig_dict['Gid'].split()[0])).gr_name
+
+    return to_report_dict
+
+
+def outputProcInfo(datetime_string,doa_char,d):
+    logger.info("%s %c %6.2f %5.2f %5.2f %5d %10s %7d %7d %7d %7d %5d %7d %7d %7d %6d %6d %6d %s"% (datetime_string,doa_char,d['%CPU'],d['%usr'],d['%sys'],d['pid'],d['Uid'],d['VmSize'], d['VmPeak'],d['VmRSS'], d['VmHWM'],d['VmStk'], d['VmData'],d['VmExe'],d['VmSwap'],d['nv_cs'],d['v_cs'],d['num_threads'],d['cmdline']))
+
+
+def dummy_func():
+    pass
+
+
+def printHeader(datetimestring,interval):
+    (systemname, nodename, release, version, machine)= os.uname()
+    logger.info("# System:  %s"%systemname)
+    logger.info("# Host:    %s"%nodename)
+    logger.info("#%s sps V0.0 (2013-04-04) -- Report Interval: %d sec"%(datetimestring,interval))
+    logger.info("#system,%s"%systemname)
+    logger.info("#colsToAvg,x,x,s,s,s,x,x,x,x,x,x,x,x,x")
+    logger.info("#columns,timestamp,doa,%cpu,%usr,%sys,pid,user,vsz,vmax,rsz,rmax,stack,data,text,swap,nv_cs,v_cs,nlwp,command")
+    logger.info("#colWithUniqueID,5")
+
+
+
+def main(opts):
+
+    num_of_cpu=len(read_lines_to_dict('/proc/stat',re.compile(r"^(cpu\d) (.*)$")))
+
+    #printHeader(str(datetime.datetime.now())[0:19].replace(' ','/'),opts["interval"])
+
+    (pid_filter,comm_filter) = ints_strs(opts['filters'])
+
+    pid_data_now={}
+    pid_data_old={}
+
+    schedule = sched.scheduler(time.time, time.sleep)
+
+    for i_sampling in range(opts["count"]):
+
+        timestamp_now = time.time()
+        pid_data_now = get_pid_data()
+        pid_set_now = set(pid_data_now.keys())
+        pid_set_old = set(pid_data_old.keys())
+        pid_set_created  =  pid_set_now - pid_set_old
+        pid_set_deleted  =  pid_set_old - pid_set_now
+        pid_set_continue =  pid_set_now & pid_set_old
+
+        #tm_string= str(datetime.datetime.fromtimestamp(timestamp_now))[0:19].replace(' ','/')
+        tm_string= str(datetime.datetime.fromtimestamp(timestamp_now))[0:19].replace(' ','T')
+
+        logger.info("#                 doa   %CPU  %usr  %sys   pid    uname       vsz   vpeak     rsz   rpeak stack    data    text    swap  nv_cs   v_cs   nlwp cmdline")
+
+
+        for i_pid in pid_set_created:
+            if pid_filter and not i_pid in pid_filter: continue
+            if comm_filter and 'comm' in pid_data_now[i_pid] and not pid_data_now[i_pid]['comm'].strip('()') in comm_filter: continue
+            outputProcInfo(tm_string,'+',procInfoCreated(pid_data_now[i_pid]))
+
+        pid_list_continue_show = pid_set_continue if not opts["delta"] else [i_pid for i_pid in pid_set_continue if 
+           list(takewhile(lambda x: x,(k for k in ['VmSize', 'VmRSS','utime', 'stime', 'cutime', 'cstime'] if pid_data_now[i_pid][k] != pid_data_old[i_pid][k] )))]
+
+        #pid_list_continue_show = []
+        #for i_pid in pid_set_continue:
+        #    for chk_key in ['VmSize', 'VmRSS','utime', 'stime', 'cutime', 'cstime']:
+        #        if pid_data_now[i_pid][chk_key] != pid_data_old[i_pid][chk_key]:
+        #            pid_list_continue_show.append(i_pid)
+        #            break
+        for i_pid in pid_list_continue_show:
+            if pid_filter and not i_pid in pid_filter: continue
+            if comm_filter and 'comm' in pid_data_now[i_pid] and not pid_data_now[i_pid]['comm'].strip('()') in comm_filter: continue
+            outputProcInfo(tm_string,'c',procInfoContinue(pid_data_old[i_pid],pid_data_now[i_pid]))
+
+        for i_pid in pid_set_deleted:
+            if pid_filter and not i_pid in pid_filter: continue
+            if comm_filter and 'comm' in pid_data_old[i_pid] and not pid_data_old[i_pid]['comm'].strip('()') in comm_filter: continue
+            outputProcInfo(tm_string,'-',procInfoDeleted(pid_data_old[i_pid]))
+
+                 
+        #logger.info("#                  SPS Statistics:{n:>6} new,{d:>6} died,{c:>6} changed,{u:>6} unchanged,{t:>6} total".format(
+        #    n=len(pid_set_created), d=len(pid_set_deleted), c=len(pid_list_continue_show), u=len(pid_set_continue)-len(pid_list_continue_show), t=len(pid_set_now)
+        #  ))
+        
+
+        pid_data_old = pid_data_now
+        schedule.enter(timestamp_now+opts["interval"] - time.time(), 1, dummy_func,())
+        schedule.run()
+
+def parsed_opts():
+    import optparse
+    import os
+
+    opt = optparse.OptionParser()
+    opt.add_option("-c", "--count", default=10, type='int', help="count to sampling [default: %default]" )
+    opt.add_option("-i", "--interval", default=10, type='int', help="interval to sampling [default: %default]" )
+    opt.add_option("-d", "--delta", default=False, action="store_true", help="show changed procs only [default: %default]" )
+    (opts, args)= opt.parse_args()
+    return dict(opts.__dict__.items() + [('filters', args)])
+
+
+if "__main__" == __name__:
+    #import cProfile
+    #cProfile.run('main(parsed_opts())')
+    main(parsed_opts())
