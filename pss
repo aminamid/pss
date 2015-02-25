@@ -211,6 +211,8 @@ def main(opts):
 
     schedule = sched.scheduler(time.time, time.sleep)
 
+    logger.info("#                 doa   %CPU  %usr  %sys   pid    uname       vsz   vpeak     rsz   rpeak stack    data    text    swap  nv_cs   v_cs   nlwp cmdline")
+
     for i_sampling in range(opts["count"]):
 
         timestamp_now = time.time()
@@ -224,12 +226,10 @@ def main(opts):
         #tm_string= str(datetime.datetime.fromtimestamp(timestamp_now))[0:19].replace(' ','/')
         tm_string= str(datetime.datetime.fromtimestamp(timestamp_now))[0:19].replace(' ','T')
 
-        logger.info("#                 doa   %CPU  %usr  %sys   pid    uname       vsz   vpeak     rsz   rpeak stack    data    text    swap  nv_cs   v_cs   nlwp cmdline")
 
 
         for i_pid in pid_set_created:
-            if pid_filter and not i_pid in pid_filter: continue
-            if comm_filter and 'comm' in pid_data_now[i_pid] and not pid_data_now[i_pid]['comm'].strip('()') in comm_filter: continue
+            if (pid_filter or comm_filter) and not ( i_pid in pid_filter or pid_data_now[i_pid]['comm'].strip('()') in comm_filter ): continue
             outputProcInfo(tm_string,'+',procInfoCreated(pid_data_now[i_pid]))
 
         pid_list_continue_show = pid_set_continue if not opts["delta"] else [i_pid for i_pid in pid_set_continue if 
@@ -242,12 +242,10 @@ def main(opts):
         #            pid_list_continue_show.append(i_pid)
         #            break
         for i_pid in pid_list_continue_show:
-            if pid_filter and not i_pid in pid_filter: continue
-            if comm_filter and 'comm' in pid_data_now[i_pid] and not pid_data_now[i_pid]['comm'].strip('()') in comm_filter: continue
+            if (pid_filter or comm_filter) and not ( i_pid in pid_filter or pid_data_now[i_pid]['comm'].strip('()') in comm_filter ): continue
             outputProcInfo(tm_string,'c',procInfoContinue(pid_data_old[i_pid],pid_data_now[i_pid]))
 
         for i_pid in pid_set_deleted:
-            if pid_filter and not i_pid in pid_filter: continue
             if comm_filter and 'comm' in pid_data_old[i_pid] and not pid_data_old[i_pid]['comm'].strip('()') in comm_filter: continue
             outputProcInfo(tm_string,'-',procInfoDeleted(pid_data_old[i_pid]))
 
@@ -260,16 +258,18 @@ def main(opts):
         pid_data_old = pid_data_now
         schedule.enter(timestamp_now+opts["interval"] - time.time(), 1, dummy_func,())
         schedule.run()
+        if opts["tag"]: logger.info("#                 doa   %CPU  %usr  %sys   pid    uname       vsz   vpeak     rsz   rpeak stack    data    text    swap  nv_cs   v_cs   nlwp cmdline")
 
 def parsed_opts():
     import optparse
     import os
 
-    opt = optparse.OptionParser()
+    opt = optparse.OptionParser(usage="usage: %prog [options] [pid or command] ... ")
     opt.add_option("-c", "--count", default=10, type='int', help="count to sampling [default: %default]" )
-    opt.add_option("-i", "--interval", default=10, type='int', help="interval to sampling [default: %default]" )
+    opt.add_option("-i", "--interval", default=2, type='int', help="interval to sampling [default: %default]" )
     opt.add_option("-d", "--delta", default=False, action="store_true", help="show changed procs only [default: %default]" )
     opt.add_option("-p", "--prof", default=False, action="store_true", help="profiling [default: %default]" )
+    opt.add_option("-t", "--tag", default=False, action="store_true", help="show tag continuously [default: %default]" )
     (opts, args)= opt.parse_args()
     return dict(opts.__dict__.items() + [('filters', args)])
 
